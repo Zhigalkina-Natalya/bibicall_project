@@ -202,3 +202,20 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# 1C / business data exports
+raw/
+data/raw/
+data/actual/
+data/daniel/
+data/history/
+data/plan/
+data/processed/
+
+# Temporary Excel files
+~$*.xlsx
+~$*.xls
+
+# Generated reports
+*_report_*.xlsx
+osg_report_*.xlsx
