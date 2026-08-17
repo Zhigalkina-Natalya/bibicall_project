@@ -73,7 +73,7 @@ def prepare_arrivals_data() -> pd.DataFrame:
         header=0,
     )
 
-    actual_raw = load_all_excel_files(
+    actual_raw = load_latest_excel_file(
         ARRIVALS_ACTUAL_DIR,
         header=6,
     )
@@ -120,31 +120,28 @@ def format_number(value: float) -> str:
 
 def get_period_column(df: pd.DataFrame, period_type: str) -> tuple[pd.DataFrame, str]:
     """
-    Добавляет колонку периода для графиков.
+    Добавляет короткую колонку периода для графиков.
     """
     df = df.copy()
 
+    df["Дата начала недели"] = pd.to_datetime(
+        df["Дата начала недели"],
+        errors="coerce",
+    )
+
     if period_type == "По годам":
         df["Период"] = df["Год"].astype(int).astype(str)
-        sort_column = "Год"
-
-    elif period_type == "По кварталам":
-        df["Период"] = (
-                df["Дата начала недели"].dt.year.astype(str)
-                + " Q"
-                + df["Дата начала недели"].dt.quarter.astype(str)
-        )
-        sort_column = "Дата начала недели"
-
-    elif period_type == "По месяцам":
-        df["Период"] = df["Дата начала недели"].dt.strftime("%Y-%m")
-        sort_column = "Дата начала недели"
-
+        df["Период_сортировка"] = df["Год"].astype(int)
     else:
-        df["Период"] = df["Неделя"]
-        sort_column = "Дата начала недели"
+        year = df["Дата начала недели"].dt.year.astype(int)
+        quarter = df["Дата начала недели"].dt.quarter.astype(int)
 
-    return df, sort_column
+        df["Период"] = year.astype(str) + "-К" + quarter.astype(str)
+        df["Период_сортировка"] = year * 10 + quarter
+
+    df["Период"] = df["Период"].astype(str)
+
+    return df, "Период_сортировка"
 
 
 def get_ordered_values(values, order_list):
@@ -497,22 +494,109 @@ def show():
                 .sort_values(sort_column)
             )
 
-            fig_period = px.bar(
-                period_chart,
-                x="Период",
-                y=value_column,
-                color=group_by,
-                title=f"Приходы: {period_type.lower()} | группировка: {group_by}",
-            )
+            if period_type == "По кварталам":
+                period_chart["Год_графика"] = period_chart["Период"].str[:4]
+                period_chart["Квартал_графика"] = (
+                        "К" + period_chart["Период"].str[-1]
+                )
 
-            fig_period.update_layout(
-                barmode="stack",
-                xaxis_title="Период",
-                yaxis_title=unit,
-                height=520,
-            )
+                period_order = (
+                    period_chart[["Период", sort_column]]
+                    .drop_duplicates()
+                    .sort_values(sort_column)["Период"]
+                    .tolist()
+                )
 
-            st.plotly_chart(fig_period, width="stretch")
+                tick_text = [
+                    "К" + period[-1]
+                    for period in period_order
+                ]
+
+                fig_period = px.bar(
+                    period_chart,
+                    x="Период",
+                    y=value_column,
+                    color=group_by,
+                    title=f"Приходы: по кварталам | группировка: {group_by}",
+                )
+
+                fig_period.update_xaxes(
+                    type="category",
+                    tickmode="array",
+                    tickvals=period_order,
+                    ticktext=tick_text,
+                    tickangle=0,
+                    categoryorder="array",
+                    categoryarray=period_order,
+                )
+
+                year_positions = (
+                    period_chart[["Период", "Год_графика"]]
+                    .drop_duplicates()
+                    .groupby("Год_графика")["Период"]
+                    .apply(list)
+                    .to_dict()
+                )
+
+                for year, periods in year_positions.items():
+                    middle_period = periods[len(periods) // 2]
+
+                    fig_period.add_annotation(
+                        x=middle_period,
+                        y=-0.18,
+                        text=year,
+                        showarrow=False,
+                        xref="x",
+                        yref="paper",
+                        font=dict(size=12),
+                    )
+
+                fig_period.update_layout(
+                    barmode="stack",
+                    xaxis_title="",
+                    yaxis_title=unit,
+                    height=560,
+                    margin=dict(b=120),
+                )
+
+            else:
+                period_order = (
+                    period_chart[["Период", sort_column]]
+                    .drop_duplicates()
+                    .sort_values(sort_column)["Период"]
+                    .tolist()
+                )
+
+                fig_period = px.bar(
+                    period_chart,
+                    x="Период",
+                    y=value_column,
+                    color=group_by,
+                    title=f"Приходы: по годам | группировка: {group_by}",
+                )
+
+                fig_period.update_xaxes(
+                    type="category",
+                    tickmode="array",
+                    tickvals=period_order,
+                    ticktext=period_order,
+                    tickangle=0,
+                    categoryorder="array",
+                    categoryarray=period_order,
+                )
+
+                fig_period.update_layout(
+                    barmode="stack",
+                    xaxis_title="Год",
+                    yaxis_title=unit,
+                    height=520,
+                    margin=dict(b=80),
+                )
+
+            st.plotly_chart(
+                fig_period,
+                width="stretch",
+            )
 
         with st.expander("🧾 Сверка по контейнерам", expanded=False):
             current_year = pd.Timestamp.today().year

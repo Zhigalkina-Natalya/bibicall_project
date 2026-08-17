@@ -200,6 +200,12 @@ def enrich_with_mapping(
 ) -> pd.DataFrame:
     """
     Добавляет Категорию, SKU, Формулу, Вес, Квант по 1С-номенклатуре.
+
+    Важно:
+    справочник product_mapping.xlsx может содержать дубли по связке
+    Номенклатурная группа + Номенклатура.
+    Чтобы факт 1С не задваивался/затраивался после merge,
+    перед соединением оставляем одну строку справочника на одну связку.
     """
     df = df.copy()
     mapping_df = prepare_mapping(mapping_df)
@@ -218,10 +224,24 @@ def enrich_with_mapping(
         "SKU Daniel",
     ]
 
+    unique_mapping = (
+        mapping_df[mapping_columns]
+        .drop_duplicates(
+            subset=[
+                "Ключ_группа",
+                "Ключ_номенклатура",
+            ],
+            keep="first",
+        )
+    )
+
     df = df.merge(
-        mapping_df[mapping_columns],
+        unique_mapping,
         how="left",
-        on=["Ключ_группа", "Ключ_номенклатура"],
+        on=[
+            "Ключ_группа",
+            "Ключ_номенклатура",
+        ],
     )
 
     return df

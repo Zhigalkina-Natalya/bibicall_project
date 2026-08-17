@@ -152,39 +152,77 @@ def add_period_column(
         period_type: str,
 ) -> tuple[pd.DataFrame, str]:
     """
-    Добавляет колонку 'Период' для графиков и таблиц.
+    Добавляет колонку 'Период' и колонку сортировки.
 
-    :param df: таблица продаж
-    :param period_type: По годам / По кварталам / По месяцам
-    :return: df с колонкой Период и название колонки сортировки
+    Важно:
+    - строки без года/квартала/месяца не должны ломать график;
+    - для графика показываем короткие подписи;
+    - сортировку делаем отдельной числовой колонкой.
     """
     df = df.copy()
 
     if df.empty:
         df["Период"] = ""
-        return df, "Период"
+        df["Период_сортировка"] = 0
+        return df, "Период_сортировка"
+
+    df["Год"] = pd.to_numeric(df["Год"], errors="coerce")
+    df["Квартал"] = pd.to_numeric(df["Квартал"], errors="coerce")
+    df["Месяц номер"] = pd.to_numeric(df["Месяц номер"], errors="coerce")
 
     if period_type == "По кварталам":
+        df = df[
+            df["Год"].notna()
+            & df["Квартал"].notna()
+        ].copy()
+
+        df["Год_int"] = df["Год"].astype(int)
+        df["Квартал_int"] = df["Квартал"].astype(int)
+
         df["Период"] = (
-                df["Год"].astype("Int64").astype(str)
-                + " Q"
-                + df["Квартал"].astype("Int64").astype(str)
+            df["Год_int"].astype(str)
+            + "-К"
+            + df["Квартал_int"].astype(str)
         )
-        sort_column = "Дата начала недели"
+
+        df["Период_сортировка"] = (
+            df["Год_int"] * 10
+            + df["Квартал_int"]
+        )
 
     elif period_type == "По месяцам":
+        df = df[
+            df["Год"].notna()
+            & df["Месяц номер"].notna()
+        ].copy()
+
+        df["Год_int"] = df["Год"].astype(int)
+        df["Месяц_int"] = df["Месяц номер"].astype(int)
+
         df["Период"] = (
-                df["Год"].astype("Int64").astype(str)
-                + "-"
-                + df["Месяц номер"].astype("Int64").astype(str).str.zfill(2)
+            df["Год_int"].astype(str)
+            + "-"
+            + df["Месяц_int"].astype(str).str.zfill(2)
         )
-        sort_column = "Дата начала недели"
+
+        df["Период_сортировка"] = (
+            df["Год_int"] * 100
+            + df["Месяц_int"]
+        )
 
     else:
-        df["Период"] = df["Год"].astype("Int64").astype(str)
-        sort_column = "Год"
+        df = df[
+            df["Год"].notna()
+        ].copy()
 
-    return df, sort_column
+        df["Год_int"] = df["Год"].astype(int)
+
+        df["Период"] = df["Год_int"].astype(str)
+        df["Период_сортировка"] = df["Год_int"]
+
+    df["Период"] = df["Период"].astype(str)
+
+    return df, "Период_сортировка"
 
 
 def make_sales_dynamic_chart_data(

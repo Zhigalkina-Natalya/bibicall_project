@@ -103,6 +103,7 @@ def highlight_total_row(row):
 
     return [""] * len(row)
 
+
 def clear_sales_processed_file() -> None:
     """
     Удаляет обработанный parquet-файл продаж.
@@ -115,6 +116,7 @@ def clear_sales_processed_file() -> None:
     """
     if SALES_PROCESSED_FILE.exists():
         SALES_PROCESSED_FILE.unlink()
+
 
 @st.cache_data(show_spinner="Загружаем и обрабатываем продажи...")
 def prepare_sales_data(force_reload: bool = False) -> pd.DataFrame:
@@ -309,6 +311,134 @@ def show_kpi(df: pd.DataFrame, value_column: str, unit: str) -> None:
     )
 
 
+MONTH_SHORT_NAMES = {
+    1: "янв",
+    2: "фев",
+    3: "мар",
+    4: "апр",
+    5: "май",
+    6: "июн",
+    7: "июл",
+    8: "авг",
+    9: "сен",
+    10: "окт",
+    11: "ноя",
+    12: "дек",
+}
+
+
+def configure_period_axis(
+        fig,
+        chart_df: pd.DataFrame,
+        period_type: str,
+        sort_column: str,
+):
+    """
+    Делает ось X читабельной:
+    - по годам: 2022, 2023, 2024;
+    - по кварталам: К1, К2, К3, К4 + год снизу;
+    - по месяцам: янв, фев, мар + год снизу.
+    """
+    period_order = (
+        chart_df[["Период", sort_column]]
+        .drop_duplicates()
+        .sort_values(sort_column)["Период"]
+        .tolist()
+    )
+
+    if period_type == "По кварталам":
+        tick_text = [
+            "К" + period.split("-К")[-1]
+            for period in period_order
+        ]
+
+        year_map = {
+            period: period.split("-К")[0]
+            for period in period_order
+        }
+
+    elif period_type == "По месяцам":
+        tick_text = []
+
+        for period in period_order:
+            month_number = int(period.split("-")[-1])
+            tick_text.append(MONTH_SHORT_NAMES.get(month_number, str(month_number)))
+
+        year_map = {
+            period: period.split("-")[0]
+            for period in period_order
+        }
+
+    else:
+        tick_text = period_order
+        year_map = {}
+
+    fig.update_xaxes(
+        type="category",
+        tickmode="array",
+        tickvals=period_order,
+        ticktext=tick_text,
+        tickangle=0,
+        categoryorder="array",
+        categoryarray=period_order,
+    )
+
+    if period_type in ["По кварталам", "По месяцам"]:
+        year_positions = {}
+
+        for period in period_order:
+            year = year_map[period]
+            year_positions.setdefault(year, []).append(period)
+
+        for year, periods in year_positions.items():
+            middle_period = periods[len(periods) // 2]
+
+            fig.add_annotation(
+                x=middle_period,
+                y=-0.22,
+                text=year,
+                showarrow=False,
+                xref="x",
+                yref="paper",
+                font=dict(size=12),
+            )
+
+        fig.update_layout(
+            xaxis_title="",
+            margin=dict(b=130),
+        )
+
+    else:
+        fig.update_layout(
+            xaxis_title="Год",
+            margin=dict(b=80),
+        )
+
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def make_cached_chart_data(
+        df: pd.DataFrame,
+        period_type: str,
+        group_by: str,
+        value_column: str,
+) -> pd.DataFrame:
+    """
+    Кэширует уже агрегированные данные для графика.
+
+    Это быстрее, чем каждый раз группировать большую таблицу при переключении.
+    """
+    chart_df = make_sales_dynamic_chart_data(
+        df=df,
+        period_type=period_type,
+        group_by=group_by,
+        value_column=value_column,
+    )
+
+    return chart_df
+
+
 def show_dynamic_chart(
         df: pd.DataFrame,
         period_type: str,
@@ -319,7 +449,7 @@ def show_dynamic_chart(
     """
     Показывает график динамики продаж.
     """
-    chart_df = make_sales_dynamic_chart_data(
+    chart_df = make_cached_chart_data(
         df=df,
         period_type=period_type,
         group_by=group_by,
@@ -329,6 +459,8 @@ def show_dynamic_chart(
     if chart_df.empty:
         st.info("Нет данных для графика по выбранным фильтрам.")
         return
+
+    sort_column = "Период_сортировка"
 
     fig = px.bar(
         chart_df,
@@ -340,16 +472,49 @@ def show_dynamic_chart(
 
     fig.update_layout(
         barmode="stack",
-        xaxis_title="Период",
         yaxis_title=unit,
-        height=520,
+        height=560 if period_type != "По годам" else 520,
     )
 
     fig.update_traces(
         hovertemplate="%{x}<br>%{y:,.0f}<extra></extra>",
     )
 
-    st.plotly_chart(fig, width="stretch")
+    fig = configure_period_axis(
+        fig=fig,
+        chart_df=chart_df,
+        period_type=period_type,
+        sort_column=sort_column,
+    )
+
+    st.plotly_chart(
+        fig,
+        width="stretch",
+    )
+
+
+def get_number_column_config(table: pd.DataFrame) -> dict:
+    """
+    Готовит быстрое форматирование числовых колонок для st.dataframe.
+
+    Это быстрее, чем pandas Styler.
+    """
+    config = {}
+
+    text_columns = [
+        "Категория",
+        "Формула",
+        "SKU",
+    ]
+
+    for column in table.columns:
+        if column not in text_columns and pd.api.types.is_numeric_dtype(table[column]):
+            config[column] = st.column_config.NumberColumn(
+                column,
+                format="%d",
+            )
+
+    return config
 
 
 def show_sku_table(
@@ -370,13 +535,15 @@ def show_sku_table(
         st.info("Нет данных для таблицы по SKU.")
         return
 
+    st.caption(
+        f"Строк в таблице: {len(table):,}".replace(",", " ")
+    )
+
     st.dataframe(
-        table
-        .style
-        .apply(highlight_total_row, axis=1)
-        .format(format_table_numbers(table)),
+        table,
         width="stretch",
         height=600,
+        column_config=get_number_column_config(table),
     )
 
 
@@ -398,13 +565,15 @@ def show_formula_table(
         st.info("Нет данных для таблицы по формулам.")
         return
 
+    st.caption(
+        f"Строк в таблице: {len(table):,}".replace(",", " ")
+    )
+
     st.dataframe(
-        table
-        .style
-        .apply(highlight_total_row, axis=1)
-        .format(format_table_numbers(table)),
+        table,
         width="stretch",
         height=520,
+        column_config=get_number_column_config(table),
     )
 
 
@@ -716,25 +885,48 @@ def show():
                 unit=unit,
             )
 
-        with st.expander("📋 Продажи по SKU", expanded=True):
+        st.divider()
+
+        st.markdown("### Детализация")
+
+        detail_block = st.radio(
+            "Что показать ниже",
+            [
+                "Не показывать тяжелые таблицы",
+                "Продажи по SKU",
+                "Продажи по формулам",
+                "Доли НЭННИ и каш",
+                "Проверка загруженных данных",
+            ],
+            horizontal=True,
+        )
+
+        if detail_block == "Продажи по SKU":
+            st.warning(
+                "Таблица по SKU может быть тяжелой при выборе периода по месяцам. "
+                "Для ускорения лучше сначала сузить фильтры."
+            )
+
             show_sku_table(
                 df=filtered_df,
                 period_type=period_type,
                 value_column=value_column,
             )
 
-        with st.expander("📋 Продажи по формулам", expanded=True):
+        elif detail_block == "Продажи по формулам":
             show_formula_table(
                 df=filtered_df,
                 period_type=period_type,
                 value_column=value_column,
             )
 
-        show_share_tables(
-            df=filtered_df,
-            period_type=period_type,
-            unit=unit,
-            selected_years=selected_years,
-        )
+        elif detail_block == "Доли НЭННИ и каш":
+            show_share_tables(
+                df=filtered_df,
+                period_type=period_type,
+                unit=unit,
+                selected_years=selected_years,
+            )
 
-        show_debug_block(filtered_df)
+        elif detail_block == "Проверка загруженных данных":
+            show_debug_block(filtered_df)
