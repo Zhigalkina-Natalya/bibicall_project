@@ -1,4 +1,11 @@
+import re
+
 import pandas as pd
+
+
+SKU_BUSINESS_MAPPINGS = {
+    "НЭННИ (ЗК) 3 800 ГР.": "НЭННИ 3 800 г.",
+}
 
 
 def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -25,6 +32,48 @@ def rename_columns(df: pd.DataFrame) -> pd.DataFrame:
         "В ед. хранения.1": "Зарезервировано",
         "В ед. хранения.2": "Свободный остаток",
     })
+
+    return df
+
+
+def normalize_sku_name(value):
+    """
+    Приводит исходное название 1С к аналитическому названию SKU.
+
+    Нормализация затрагивает только подтверждённые технические отличия:
+    - ведущую служебную звёздочку;
+    - пробелы по краям;
+    - повторные пробельные символы;
+    - отсутствующую точку в конце обозначения "г".
+
+    Смысловые части названия, цифры и вес не исправляются.
+    """
+    if pd.isna(value):
+        return pd.NA
+
+    text = str(value).replace("\xa0", " ").strip()
+    text = re.sub(r"^\*\s*", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+г$", " г.", text, flags=re.IGNORECASE)
+
+    business_key = text.upper().replace("Ё", "Е")
+    text = SKU_BUSINESS_MAPPINGS.get(business_key, text)
+
+    return text
+
+
+def normalize_sku(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Сохраняет исходное название 1С и формирует аналитический SKU.
+
+    Количество строк и данные партий функция не изменяет.
+    """
+    df = df.copy()
+
+    if "SKU_исходный" not in df.columns:
+        df["SKU_исходный"] = df["SKU"]
+
+    df["SKU"] = df["SKU"].apply(normalize_sku_name)
 
     return df
 
@@ -170,6 +219,7 @@ def prepare_final_columns(df: pd.DataFrame) -> pd.DataFrame:
     final_columns = [
         "Склад",
         "Категория",
+        "SKU_исходный",
         "SKU",
         "Срок годности",
         "Контейнер",

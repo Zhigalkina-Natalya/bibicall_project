@@ -7,6 +7,7 @@ from src.osg.transformer import (
     extract_weight,
     transform_category,
     prepare_final_columns,
+    normalize_sku,
 )
 from src.osg.calculator import calculate_osg
 from src.exporter import save_to_excel
@@ -33,6 +34,7 @@ def main():
 
     df = clean_columns(df)
     df = rename_columns(df)
+    df = normalize_sku(df)
     df = remove_service_rows(df)
     df = convert_dates(df)
     df = extract_weight(df)

@@ -6,8 +6,9 @@ CATEGORY_SHELF_LIFE = {
     "ПЕЧЕНЬЕ": 365,
     "БИБИКАША": 456,
     "ПЮРЕ МОЛОЧНОЕ": 547,
-    "ТВОРОЖНОЕ ПЮРЕ": 547,
+    "ПЮРЕ ТВОРОЖНОЕ": 730,
     "МЯСНЫЕ КОНСЕРВЫ": 730,
+    "РЫБНЫЕ КОНСЕРВЫ": 730,
     "АМАЛТЕЯ": 1080,
 }
 
@@ -21,6 +22,8 @@ NENNI_SHELF_LIFE_DAYS = {
     "НЭННИ 1 800": 912,
     "НЭННИ 2 400": 912,
     "НЭННИ 2 800": 912,
+    "НЭННИ 3 400": 912,
+    "НЭННИ 3 800": 912,
     "НЭННИ 4 400": 730,
     "НЭННИ 4 800": 730,
 }
@@ -64,6 +67,28 @@ def get_nenni_shelf_life_days(sku: str) -> int | None:
 
 
 # 🧠 Главная логика определения срока
+def get_shelf_life_rule(row) -> tuple[str, int]:
+    """
+    Возвращает название применённого правила и полный срок жизни.
+
+    Отдельное имя правила нужно только для диагностики и тестов.
+    Существующие сроки и fallback 730 не изменяются.
+    """
+    category = normalize_text(row["Категория"])
+    sku = row["SKU"]
+
+    if "НЭННИ" in category:
+        days = get_nenni_shelf_life_days(sku)
+        if days:
+            return "НЭННИ по SKU", days
+
+    for key, days in CATEGORY_SHELF_LIFE.items():
+        if key in category:
+            return f"Категория: {key}", days
+
+    return "Fallback 730", 730
+
+
 def get_shelf_life(row) -> int:
     """
     Определяет срок жизни:
@@ -73,25 +98,15 @@ def get_shelf_life(row) -> int:
     :param row: строка DataFrame
     :return: срок жизни в днях
     """
-    category = normalize_text(row["Категория"])
-    sku = row["SKU"]
-
-    # 🔥 НЭННИ → по SKU
-    if "НЭННИ" in category:
-        days = get_nenni_shelf_life_days(sku)
-        if days:
-            return days
-
-    # 📦 Остальные категории
-    for key, days in CATEGORY_SHELF_LIFE.items():
-        if key in category:
-            return days
-
-    return 730  # дефолт
+    _, days = get_shelf_life_rule(row)
+    return days
 
 
 # 📊 Основная функция расчёта ОСГ
-def calculate_osg(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_osg(
+        df: pd.DataFrame,
+        calculation_date=None,
+) -> pd.DataFrame:
     """
     Рассчитывает:
     - дни до окончания срока
@@ -101,9 +116,12 @@ def calculate_osg(df: pd.DataFrame) -> pd.DataFrame:
     :param df: DataFrame
     :return: DataFrame с расчётами
     """
-    today = datetime.today()
+    if calculation_date is None:
+        calculation_date = datetime.today()
 
-    df["days_left"] = (df["Срок годности"] - today).dt.days
+    calculation_date = pd.Timestamp(calculation_date).normalize()
+
+    df["days_left"] = (df["Срок годности"] - calculation_date).dt.days
 
     df["total_days"] = df.apply(get_shelf_life, axis=1)
 

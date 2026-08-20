@@ -10,7 +10,10 @@ def load_latest_file(folder: Path) -> pd.DataFrame:
     В отчёте 1С реальные заголовки таблицы находятся на 8-й строке Excel.
     В pandas нумерация начинается с 0, поэтому используем header=7.
     """
-    files = list(folder.glob("*.xlsx"))
+    files = [
+        file for file in folder.glob("*.xlsx")
+        if not file.name.startswith("~$")
+    ]
 
     if not files:
         raise FileNotFoundError(f"В папке {folder} нет Excel-файлов .xlsx")

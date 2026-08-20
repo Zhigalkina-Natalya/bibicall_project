@@ -8,6 +8,16 @@ import streamlit as st
 from src.config import RAW_DATA_DIR
 from src.loader import load_latest_file
 from src.osg.calculator import calculate_osg
+from src.osg.exporter import export_osg_table
+from src.osg.quality import run_quality_diagnostics
+from src.osg.presentation import sort_full_stock_view, sort_small_stock_view
+from src.osg.rules import (
+    RISK_LEVELS,
+    build_urgent_sales,
+    count_attention_groups,
+    get_risk_level,
+    validate_and_split_stock,
+)
 from src.osg.transformer import (
     clean_columns,
     rename_columns,
@@ -16,6 +26,7 @@ from src.osg.transformer import (
     extract_weight,
     transform_category,
     normalize_data_types,
+    normalize_sku,
 )
 from src.validator import run_all_checks
 
@@ -30,6 +41,7 @@ def prepare_data() -> pd.DataFrame:
 
     df = clean_columns(df)
     df = rename_columns(df)
+    df = normalize_sku(df)
     df = normalize_data_types(df)
     df = remove_service_rows(df)
     df = convert_dates(df)
@@ -45,7 +57,10 @@ def get_report_date() -> str:
     Определяет дату отчёта из имени последнего файла формата osg_YYYY_MM_DD.xlsx.
     Если дату найти не удалось, возвращает сегодняшнюю дату.
     """
-    files = list(RAW_DATA_DIR.glob("*.xls*"))
+    files = [
+        file for file in RAW_DATA_DIR.glob("*.xls*")
+        if not file.name.startswith("~$")
+    ]
 
     if not files:
         return datetime.today().strftime("%d.%m.%Y")
@@ -58,29 +73,6 @@ def get_report_date() -> str:
 
     year, month, day = match.groups()
     return f"{day}.{month}.{year}"
-
-
-def get_risk_level(osg: float) -> str:
-    """
-    Возвращает уровень риска по ОСГ.
-    """
-    if pd.isna(osg):
-        return "Ошибка"
-    if osg >= 75:
-        return "Свежий 🟢"
-    if osg >= 70:
-        return "ОК 🟢"
-    if osg >= 66:
-        return "Норма 🟡"
-    if osg >= 60:
-        return "Внимание 🟡"
-    if osg >= 50:
-        return "Пограничный 🟠"
-    if osg >= 40:
-        return "Горящий 🔴"
-    if osg >= 20:
-        return "Критично 🔴"
-    return "Списание ⚫"
 
 
 def color_osg(val):
@@ -149,6 +141,8 @@ def style_table(df: pd.DataFrame, osg_column: str):
         "Вес": format_weight,
         osg_column: format_percent,
     }
+    if "Доля резерва, %" in df.columns:
+        formatters["Доля резерва, %"] = format_percent
 
     return (
         df.style
@@ -187,24 +181,45 @@ def kpi_color(label, value, color):
     """
 
 
+def show_excel_download(
+        df: pd.DataFrame,
+        sheet_name: str,
+        file_name: str,
+        key: str,
+        risk_values: pd.Series | None = None,
+) -> None:
+    """Displays a download button for a formatted XLSX table."""
+    st.download_button(
+        label="⬇️ Скачать Excel",
+        data=export_osg_table(df, sheet_name, risk_values=risk_values),
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=key,
+    )
+
+
 def show():
     """
     Отображает страницу ОСГ.
     """
-    df = prepare_data()
+    full_df = prepare_data()
+    full_df["Риск"] = full_df["ОСГ %"].apply(get_risk_level)
+    quality_summary = run_quality_diagnostics(full_df)
 
-    # Вся аналитика работает только по строкам, где остаток >= 50 шт.
-    df = df[df["Остаток"] >= 50].copy()
-
-    df["Риск"] = df["ОСГ %"].apply(get_risk_level)
-
-    errors = run_all_checks(df)
+    errors, df, small_stock_df = validate_and_split_stock(
+        full_df,
+        run_all_checks,
+    )
 
     df_view = df.copy()
     df_view["Срок годности"] = df_view["Срок годности"].dt.strftime("%d.%m.%Y")
     df_view["ОСГ %"] = df_view["ОСГ %"].round(2)
 
     report_date = get_report_date()
+    export_date = pd.to_datetime(
+        report_date,
+        format="%d.%m.%Y",
+    ).strftime("%Y-%m-%d")
 
     header_col1, header_col2 = st.columns([3, 1])
 
@@ -213,15 +228,6 @@ def show():
 
     with header_col2:
         st.markdown(f"**на {report_date}**")
-
-    if errors:
-        st.error("Есть ошибки в данных")
-        for error in errors:
-            st.write(f"• {error}")
-    else:
-        st.success("Проверка пройдена: ошибок не найдено")
-
-    st.divider()
 
     main_col, filter_col = st.columns([5, 1.2])
 
@@ -242,17 +248,7 @@ def show():
             default=warehouses,
         )
 
-        risk_levels = [
-            "Свежий 🟢",
-            "ОК 🟢",
-            "Норма 🟡",
-            "Внимание 🟡",
-            "Пограничный 🟠",
-            "Горящий 🔴",
-            "Критично 🔴",
-            "Списание ⚫",
-            "Ошибка 🚨",
-        ]
+        risk_levels = RISK_LEVELS
 
         selected_risks = st.multiselect(
             "Риск",
@@ -284,11 +280,12 @@ def show():
             & (kpi_table["ОСГ %"] < 60)
             ]
     )
+    attention_count = count_attention_groups(kpi_table)
     avg_osg = kpi_table["ОСГ %"].mean()
     total_free = kpi_table["Свободный остаток"].sum()
 
     with main_col:
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
 
         col1.markdown(
             kpi_color("🔴 Критично (<50%)", critical_count, "#e74c3c"),
@@ -301,6 +298,11 @@ def show():
         )
 
         col3.markdown(
+            kpi_color("🟡 Внимание (60–<66%)", attention_count, "#f1c40f"),
+            unsafe_allow_html=True,
+        )
+
+        col4.markdown(
             kpi_color(
                 "🟢 Средний ОСГ",
                 format_percent(avg_osg),
@@ -309,7 +311,7 @@ def show():
             unsafe_allow_html=True,
         )
 
-        col4.markdown(
+        col5.markdown(
             kpi_color("Свободный остаток", format_int(total_free), "#34495e"),
             unsafe_allow_html=True,
         )
@@ -362,20 +364,7 @@ def show():
             st.plotly_chart(fig_category, width="stretch")
 
         with st.expander("🚨 Что нужно срочно продать", expanded=True):
-            urgent_sales = (
-                filtered_df[
-                    (filtered_df["ОСГ %"] < 60)
-                    & (filtered_df["Свободный остаток"] >= 80)
-                    ]
-                .groupby(["Категория", "SKU", "Срок годности"], as_index=False)
-                .agg({
-                    "Остаток": "sum",
-                    "Зарезервировано": "sum",
-                    "Свободный остаток": "sum",
-                    "ОСГ %": "min",
-                })
-                .sort_values(["ОСГ %", "Свободный остаток"], ascending=[True, False])
-            )
+            urgent_sales = build_urgent_sales(filtered_df)
 
             urgent_sales["Риск"] = urgent_sales["ОСГ %"].apply(get_risk_level)
 
@@ -389,65 +378,132 @@ def show():
                     "Остаток",
                     "Зарезервировано",
                     "Свободный остаток",
+                    "Доля резерва, %",
                 ]
             ]
 
             st.dataframe(
                 style_table(urgent_sales, "ОСГ %"),
                 width="stretch",
+                hide_index=True,
+            )
+            show_excel_download(
+                urgent_sales,
+                "Срочные продажи",
+                f"osg_urgent_sales_{export_date}.xlsx",
+                "download_osg_urgent_sales",
             )
 
-        with st.expander("⚠️ SKU по ОСГ с риском", expanded=True):
-            risk_table = (
-                filtered_df
-                .groupby(["Категория", "SKU", "Срок годности"], as_index=False)
-                .agg({
-                    "Остаток": "sum",
-                    "Зарезервировано": "sum",
-                    "Свободный остаток": "sum",
-                    "ОСГ %": "min",
-                })
-                .sort_values("ОСГ %")
-            )
+        with st.container():
+            with st.expander("⚠️ SKU по ОСГ с риском", expanded=True):
+                risk_table = (
+                    filtered_df
+                    .groupby(["Категория", "SKU", "Срок годности"], as_index=False)
+                    .agg({
+                        "Остаток": "sum",
+                        "Зарезервировано": "sum",
+                        "Свободный остаток": "sum",
+                        "ОСГ %": "min",
+                    })
+                    .sort_values("ОСГ %")
+                )
 
-            risk_table["Риск"] = risk_table["ОСГ %"].apply(get_risk_level)
+                risk_table["Риск"] = risk_table["ОСГ %"].apply(get_risk_level)
 
-            risk_table = risk_table[
-                [
-                    "Категория",
-                    "SKU",
-                    "Срок годности",
-                    "ОСГ %",
-                    "Риск",
-                    "Остаток",
-                    "Зарезервировано",
-                    "Свободный остаток",
+                risk_table = risk_table[
+                    [
+                        "Категория",
+                        "SKU",
+                        "Срок годности",
+                        "ОСГ %",
+                        "Риск",
+                        "Остаток",
+                        "Зарезервировано",
+                        "Свободный остаток",
+                    ]
                 ]
-            ]
 
-            st.dataframe(
-                style_table(risk_table, "ОСГ %"),
-                width="stretch",
+                st.dataframe(
+                    style_table(risk_table, "ОСГ %"),
+                    width="stretch",
+                    hide_index=True,
+                )
+                show_excel_download(
+                    risk_table,
+                    "SKU по риску",
+                    f"osg_risk_sku_{export_date}.xlsx",
+                    "download_osg_risk_sku",
+                )
+
+        with st.container():
+            with st.expander("📋 Сводная таблица по категориям и SKU", expanded=True):
+                pivot_table = (
+                    filtered_df
+                    .groupby(["Категория", "SKU"], as_index=False)
+                    .agg({
+                        "Остаток": "sum",
+                        "Зарезервировано": "sum",
+                        "Свободный остаток": "sum",
+                        "ОСГ %": "min",
+                    })
+                    .sort_values(["Категория", "ОСГ %"])
+                )
+
+                pivot_table = pivot_table.rename(columns={"ОСГ %": "min ОСГ %"})
+
+                st.dataframe(
+                    style_table(pivot_table, "min ОСГ %"),
+                    width="stretch",
+                    hide_index=True,
+                )
+                show_excel_download(
+                    pivot_table,
+                    "Сводная по SKU",
+                    f"osg_summary_sku_{export_date}.xlsx",
+                    "download_osg_summary_sku",
+                    risk_values=pivot_table["min ОСГ %"].apply(
+                        get_risk_level
+                    ),
+                )
+
+        with st.expander(
+                f"📦 Малые остатки ≤ 100 шт. ({len(small_stock_df)})",
+                expanded=False,
+        ):
+            st.caption(
+                "Позиции сохранены для контроля склада и возможного использования "
+                "для образцов, маркетинга, благотворительности или внутренних нужд."
             )
 
-        with st.expander("📋 Сводная таблица по категориям и SKU", expanded=False):
-            pivot_table = (
-                filtered_df
-                .groupby(["Категория", "SKU"], as_index=False)
-                .agg({
-                    "Остаток": "sum",
-                    "Зарезервировано": "sum",
-                    "Свободный остаток": "sum",
-                    "ОСГ %": "min",
-                })
-                .sort_values(["Категория", "ОСГ %"])
+            small_stock_view = small_stock_df.copy()
+            small_stock_view["Срок годности"] = (
+                small_stock_view["Срок годности"].dt.strftime("%d.%m.%Y")
             )
-
-            pivot_table = pivot_table.rename(columns={"ОСГ %": "min ОСГ %"})
+            small_stock_view["ОСГ %"] = small_stock_view["ОСГ %"].round(2)
+            small_stock_view = sort_small_stock_view(small_stock_view)
+            small_stock_view = small_stock_view[[
+                "Склад",
+                "Категория",
+                "SKU",
+                "Контейнер",
+                "Срок годности",
+                "ОСГ %",
+                "Остаток",
+                "Зарезервировано",
+                "Свободный остаток",
+            ]]
 
             st.dataframe(
-                style_table(pivot_table, "min ОСГ %"),
+                style_table(small_stock_view, "ОСГ %"),
                 width="stretch",
+                hide_index=True,
+            )
+            show_excel_download(
+                small_stock_view,
+                "Малые остатки",
+                f"osg_small_stock_{export_date}.xlsx",
+                "download_osg_small_stock",
+                risk_values=small_stock_df["Риск"],
             )
 
         with st.expander("📋 Полная таблица со складами", expanded=False):
@@ -463,6 +519,7 @@ def show():
             )
 
             clean_df = clean_df.rename(columns={"total_days": "days_total"})
+            clean_df = sort_full_stock_view(clean_df)
 
             final_columns = [
                 "Склад",
@@ -485,11 +542,18 @@ def show():
             st.dataframe(
                 style_table(clean_df, "ОСГ %"),
                 width="stretch",
+                hide_index=True,
+            )
+            show_excel_download(
+                clean_df,
+                "Остатки по складам",
+                f"osg_full_stock_{export_date}.xlsx",
+                "download_osg_full_stock",
             )
 
         with st.expander("🧮 Калькулятор ОСГ", expanded=False):
             calculator_df = df.copy()
-            calculator_df = calculator_df[calculator_df["Остаток"] >= 50]
+            calculator_df = calculator_df[calculator_df["Остаток"] > 100]
 
             st.markdown("#### 1. Узнать дату наступления нужного % ОСГ")
 
@@ -585,25 +649,18 @@ def show():
                 f"{format_percent(osg_on_date)}"
             )
 
-        with st.expander("💰 Где заморожены деньги", expanded=False):
-            frozen_stock = (
-                filtered_df[
-                    (filtered_df["ОСГ %"] >= 75)
-                    & (filtered_df["Свободный остаток"] >= 1000)
-                    ]
-                .groupby(["Категория", "SKU"], as_index=False)
-                .agg({
-                    "Остаток": "sum",
-                    "Зарезервировано": "sum",
-                    "Свободный остаток": "sum",
-                    "ОСГ %": "min",
-                })
-                .sort_values("Свободный остаток", ascending=False)
-            )
+        st.divider()
 
-            frozen_stock = frozen_stock.rename(columns={"ОСГ %": "min ОСГ %"})
+        if errors:
+            st.error("Есть ошибки в данных")
+            for error in errors:
+                st.write(f"• {error}")
+        else:
+            st.success("Проверка пройдена: ошибок не найдено")
 
-            st.dataframe(
-                style_table(frozen_stock, "min ОСГ %"),
-                width="stretch",
+        with st.expander("🔎 Диагностика качества полного набора", expanded=False):
+            quality_table = pd.DataFrame(
+                quality_summary.items(),
+                columns=["Проверка", "Количество строк"],
             )
+            st.dataframe(quality_table, width="stretch", hide_index=True)
