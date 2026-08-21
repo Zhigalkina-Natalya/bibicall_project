@@ -1,10 +1,11 @@
-from io import BytesIO
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
 from src.arrivals.calculator import (
+    add_annual_total_rows,
     get_value_column,
+    make_container_comparison,
     make_week_label,
     normalize_container,
     replace_plan_with_fact,
@@ -14,6 +15,7 @@ from src.arrivals.loader import (
     load_latest_excel_file,
     load_product_mapping,
 )
+from src.arrivals.exporter import export_finance_table, get_finance_row_style
 from src.arrivals.transformer import (
     transform_actual_arrivals,
     transform_daniel_arrivals,
@@ -172,10 +174,6 @@ def make_finance_table(
         df["Источник"].isin(["Факт 1С", "План Дениэл"])
     ].copy()
 
-    finance_df = finance_df[
-        finance_df["Год"].astype("Int64").isin([current_year, current_year + 1])
-    ].copy()
-
     if finance_df.empty:
         return pd.DataFrame()
 
@@ -247,29 +245,7 @@ def make_finance_table(
 
     table = table[base_columns + final_sku_columns]
 
-    current_year_rows = table[table["Год"] == str(current_year)]
-
-    if not current_year_rows.empty:
-        total_row = {
-            "Год": f"ИТОГ {current_year}",
-            "Квартал": "ИТОГ",
-            "Месяц": "",
-            "№ недели": "",
-            "№ конт": "",
-            "Статус": "",
-        }
-
-        for col in final_sku_columns:
-            total_row[col] = current_year_rows[col].sum()
-
-        table = pd.concat(
-            [
-                table[table["Год"] == str(current_year)],
-                pd.DataFrame([total_row]),
-                table[table["Год"] == str(current_year + 1)],
-            ],
-            ignore_index=True,
-        )
+    table = add_annual_total_rows(table, final_sku_columns)
 
     text_columns = [
         "Год",
@@ -295,42 +271,19 @@ def style_finance_table(row):
     - просроченный план без факта — розовый
     - итог — тёмно-красный
     """
-    if str(row.get("Год", "")).startswith("ИТОГ"):
-        return ["background-color: #b71c1c; color: white; font-weight: bold"] * len(row)
+    style = get_finance_row_style(row)
+    css_parts = []
 
-    status = row.get("Статус", "")
+    if style["fill"]:
+        css_parts.append(f"background-color: #{style['fill']}")
 
-    if status == "✅ Факт":
-        return ["background-color: #eaf7ea"] * len(row)
+    css_parts.append(f"color: #{style['font_color']}")
 
-    if status == "⚠️ Плановая дата прошла, факта нет":
-        return ["background-color: #fde2e2; color: #7a1f1f"] * len(row)
+    if style["bold"]:
+        css_parts.append("font-weight: bold")
 
-    try:
-        quarter = int(row.get("Квартал", 0))
-    except ValueError:
-        quarter = 0
-
-    colors = {
-        1: "background-color: #eef5ff",
-        2: "background-color: #eefaf1",
-        3: "background-color: #fff8e6",
-        4: "background-color: #f7eefc",
-    }
-
-    return [colors.get(quarter, "")] * len(row)
-
-
-def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """
-    Готовит Excel-файл для скачивания.
-    """
-    output = BytesIO()
-
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="План поставок")
-
-    return output.getvalue()
+    css = "; ".join(css_parts)
+    return [css] * len(row)
 
 
 def show():
@@ -361,7 +314,7 @@ def show():
         st.write("Годы:", sorted(df["Год"].dropna().astype(int).unique()))
         st.write("Типы:", sorted(df["Тип данных"].dropna().unique()))
         st.write("Источники:", sorted(df["Источник"].dropna().unique()))
-        st.dataframe(df.head(80), width="stretch")
+        st.dataframe(df.head(80), width="stretch", hide_index=True)
 
     main_col, filter_col = st.columns([5, 1.25])
 
@@ -611,91 +564,38 @@ def show():
             fact_column_name = f"Факт, {unit_suffix}"
             diff_column_name = f"Разница, {unit_suffix}"
 
-            compare_df = df_all[
-                (df_all["Год"].astype("Int64") == current_year)
-                & (df_all["Источник"].isin(["Факт 1С", "План Дениэл"]))
-                ].copy()
-
-            compare_df["Контейнер"] = compare_df["Контейнер"].apply(normalize_container)
-
-            # Для сверки по контейнерам берём только строки, где контейнер указан
-            compare_df = compare_df[
-                compare_df["Контейнер"].notna()
-                & (~compare_df["Контейнер"].isin(["", "nan", "None"]))
-                ].copy()
-
-            plan_containers = set(
-                compare_df[
-                    compare_df["Источник"] == "План Дениэл"
-                    ]["Контейнер"]
-            )
-
-            fact_containers = set(
-                compare_df[
-                    compare_df["Источник"] == "Факт 1С"
-                    ]["Контейнер"]
-            )
-
-            all_containers = sorted(
-                plan_containers.union(fact_containers),
-                key=lambda x: int(x) if str(x).isdigit() else str(x),
-            )
-
-            rows = []
-
-            for container in all_containers:
-                plan_part = compare_df[
-                    (compare_df["Источник"] == "План Дениэл")
-                    & (compare_df["Контейнер"] == container)
-                    ]
-
-                fact_part = compare_df[
-                    (compare_df["Источник"] == "Факт 1С")
-                    & (compare_df["Контейнер"] == container)
-                    ]
-
-                plan_sku = set(plan_part["SKU"].dropna().astype(str))
-                fact_sku = set(fact_part["SKU"].dropna().astype(str))
-
-                if not plan_part.empty and not fact_part.empty:
-                    if plan_sku == fact_sku:
-                        status = "✅ План совпал с фактом"
-                    else:
-                        status = "⚠️ Состав изменился"
-                elif not plan_part.empty:
-                    status = "🟡 Только план"
-                else:
-                    status = "🔵 Только факт"
-
-                rows.append({
-                    "Контейнер": container,
-                    "Статус": status,
-                    "План SKU": ", ".join(sorted(plan_sku)),
-                    "Факт SKU": ", ".join(sorted(fact_sku)),
-                    plan_column_name: plan_part[value_column].sum(),
-                    fact_column_name: fact_part[value_column].sum(),
-                    diff_column_name: (
-                            fact_part[value_column].sum()
-                            - plan_part[value_column].sum()
-                    ),
-                })
-
-            container_compare = pd.DataFrame(rows)
+            container_compare = make_container_comparison(
+                df=df_all,
+                value_column=value_column,
+                year=current_year,
+            ).rename(columns={
+                f"План, {value_column}": plan_column_name,
+                f"Факт, {value_column}": fact_column_name,
+                f"Разница, {value_column}": diff_column_name,
+            })
 
             def highlight_status(row):
                 status = row["Статус"]
 
-                if status == "✅ План совпал с фактом":
+                if status == "✅ Совпадает с планом":
                     return ["background-color: #d4edda"] * len(row)
 
-                if status == "⚠️ Состав изменился":
+                if status in [
+                    "⚠️ Изменён ассортимент",
+                    "⚠️ Изменено количество",
+                    "⚠️ Изменён ассортимент и количество",
+                    "🔴 Плановая дата прошла, факта нет",
+                ]:
                     return ["background-color: #f8d7da"] * len(row)
 
-                if status == "🟡 Только план":
+                if status == "🟡 Ожидается приход":
                     return ["background-color: #fff3cd"] * len(row)
 
-                if status == "🔵 Только факт":
+                if status == "🔵 Факт без плана Daniel":
                     return ["background-color: #d1ecf1"] * len(row)
+
+                if status == "⚪ Контейнер не назначен":
+                    return ["background-color: #f2f2f2"] * len(row)
 
                 return [""] * len(row)
 
@@ -713,6 +613,7 @@ def show():
                     }),
                     width="stretch",
                     height=600,
+                    hide_index=True,
                 )
 
         with st.expander("📌 План ПОСТАВОК vs факт + незакрытый план", expanded=True):
@@ -835,6 +736,7 @@ def show():
                 ),
                 width="stretch",
                 height=500,
+                hide_index=True,
             )
 
         with st.expander("💼 Таблица ПЛАН ПОСТАТОК для финансового ассистента", expanded=True):
@@ -871,9 +773,10 @@ def show():
                     .format(value_format),
                     width="stretch",
                     height=600,
+                    hide_index=True,
                 )
 
-                excel_bytes = dataframe_to_excel_bytes(finance_table)
+                excel_bytes = export_finance_table(finance_table, unit=unit)
 
                 st.download_button(
                     label="📥 Скачать таблицу в Excel",
