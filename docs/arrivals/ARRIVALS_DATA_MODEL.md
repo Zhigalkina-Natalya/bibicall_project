@@ -10,6 +10,11 @@
 DanielSnapshot
     └─ DanielSourceRecord
 
+PRODUCT
+    └─ PRODUCT SERIES
+           ├─ STOCK SNAPSHOT
+           └─ ReceiptSourceRecord
+
 MovementSourceRecord
     ├─ ReceiptSourceRecord
     └─ CostMovementRecord
@@ -21,6 +26,22 @@ MovementSourceRecord
 `MovementSourceRecord` сохраняет движение 1С до бизнес-классификации. Записи
 приходов и затрат — разные типизированные сущности, а не строки одной плоской таблицы
 с искусственными нулями.
+
+Целевая связь справочников и прихода:
+
+```text
+/receipts                         /product_series
+  product_id ───────────────────→ product_id
+  series_id  ───────────────────→ series_id
+  container/shipment number       series_name
+  receipt_datetime                expiry_date
+  quantity                        production_date
+                                  gtd_number
+                                  country_of_origin
+```
+
+`container/shipment number` и `gtd_number` — независимые атрибуты. Cardinality
+между ними не определяется до подтверждения 1С.
 
 ## 2. Исходные и аналитические значения
 
@@ -117,9 +138,10 @@ Grain должен соответствовать минимальному до�
 | Поле | Обязательность | Значение | Допускает null | Примечания |
 |---|---|---|---|---|
 | `receipt_record_id` | Да | Внутренний ID | Нет | |
-| `movement_id` | Желательно | Стабильный ID движения | Да, если недоступен | Запросить 1С |
-| `document_id` | Да | Стабильный ID документа | Нет | |
-| `document_line_id` | Да | Стабильный ID строки | Нет | |
+| `source_record_id` | Да по смыслу | Стабильный source ID записи | Нет | Реальное имя/состав подтверждает 1С |
+| `movement_id` | Предпочтительная модель | Стабильный ID движения | Да, если недоступен | Не утверждается как существующее поле |
+| `document_id` | Предпочтительная модель | Стабильный ID документа | Да, если недоступен | Запросить 1С |
+| `document_line_id` | Предпочтительная модель | Стабильный ID строки | Да, если недоступен | Запросить 1С |
 | `document_type/number` | Да | Исходный документ | Нет | |
 | `document_datetime` | Да | Дата документа | Нет | Не считается автоматически временем прихода |
 | `movement_datetime` | Да | Дата движения | Нет | Семантика уточняется |
@@ -130,22 +152,37 @@ Grain должен соответствовать минимальному до�
 | `analytical_sku` | Расчётное | Нормализованный SKU | Да | |
 | `characteristic_id/name` | Желательно | Характеристика | Да | |
 | `container_number` | Обязательно по бизнес-правилу | Ссылка на контейнер/поставку | Нет для валидного факта | Невалидные значения сохраняются с ошибкой качества |
-| `series_id/number` | Желательно | Серия | Да | |
+| `series_id/number` | SHOULD HAVE | Серия и связь с product_series | Да | Стабильность `series_id` подтверждает 1С |
 | `quantity` | Да | Физическое количество | Нет | Не заполнять искусственно |
 | `unit_id/name` | Да | Единица | Нет | |
 | `warehouse_id/name` | Да | Склад | Нет | |
 | `supplier_id/name` | Да | Поставщик | Нет | |
 | `organization_id/name` | Да | Организация | Нет | |
 | `production_date` | Желательно | Факт производства | Да | |
-| `expiry_date` | Обязательно, если хранится | Фактический срок | Да | Источник истины после прихода |
-| `posted/status/deleted` | Да | Валидность | Нет | |
-| `last_modified_at` | Да | Инкрементальное обновление | Нет | |
+| `expiry_date` | Обязательно, если хранится и доступно | Фактический срок | Да | Может быть canonical в product_series или control duplicate в receipts |
+| `document_validity` | Да по смыслу | Действует/отменён/удалён | Нет | Минимальный набор source fields предлагает 1С |
+| `last_modified_at` | Желательно | Инкрементальное обновление | Да, если timestamp недоступен | Допустим эквивалентный update marker |
 | `data_quality_status/issues` | Расчётное | Ошибки записи | Нет | Не удаляет запись |
 
 Невалидный container reference (`null`, пусто, `0`, `"0"`) создаёт DQ error и
 запрещает автоматическое закрытие Daniel plan, но не удаляет факт.
 
+`series_id` — предпочтительная стабильная связь receipt с
+`GET /api/v1/product_series`. Если связь подтверждена, `series_name`,
+`expiry_date`, `production_date`, `gtd_number` и `country_of_origin` не требуется
+автоматически дублировать в receipts. `receipts.expiry_date` и
+`receipts.gtd_number` допустимы на тестовом этапе как duplicated control fields.
+При расхождении с `product_series` ingestion сохраняет оба source values и
+формирует диагностику.
+
+`gtd_number` не является обязательным полем receipt, business key, technical key
+или идентификатором контейнера.
+
 ## 7. CostMovementRecord
+
+`CostMovementRecord` относится к FUTURE / OPTIONAL ARCHITECTURE и не блокирует
+запуск `GET /api/v1/receipts`. Полноценная cost model потребует также данных
+бухгалтерской 1С.
 
 Уровень детализации (grain): одна финансовая/налоговая строка движения на уровне, переданном 1С.
 
@@ -172,6 +209,12 @@ Grain должен соответствовать минимальному до�
 
 Финансовые движения не создают физическое quantity и не входят в текущие ARRIVALS KPI.
 
+Для документа «ГТД по импорту» `cost_amount` содержит таможенные начисления,
+включая налог, сбор и пошлину, а также НДС при его наличии. `vat_amount` содержит
+отдельную сумму НДС там, где он начислен. Эти поля не образуют полную landed cost,
+поскольку транспортные, складские и другие расходы находятся в бухгалтерской 1С.
+Автоматическое сложение receipt cost и GTD cost как полной себестоимости запрещено.
+
 ## 8. ArrivalAnalyticalRecord
 
 Производное представление для reconciliation, KPI и Streamlit. Оно не заменяет
@@ -197,6 +240,9 @@ Grain должен соответствовать минимальному до�
 
 Агрегация исходных строк Daniel разрешена только в соответствующем аналитическом
 представлении. Замещение плана фактом применяется только по валидному container_number.
+
+Связь с `product_series` выполняется по `series_id`, а не по `series_name`,
+`expiry_date` или `gtd_number`.
 
 ## 9. Стабильные ID и business keys
 
@@ -242,17 +288,13 @@ last_modified_at
 ### Обязательные поля (MUST HAVE)
 
 ```text
-document_id
-document_line_id
+stable source record/document ID
 document_number
 document_type
-document_datetime
-movement_datetime
+receipt_datetime
 product_id
 product_code
 product_name
-characteristic_id
-characteristic_name
 quantity
 unit_id
 unit_name
@@ -262,24 +304,31 @@ supplier_id
 supplier_name
 organization_id
 organization_name
-posted
-status
-deleted/cancelled
-last_modified_at
-expiry_date (если хранится в 1С)
+container / shipment number (API field name requires 1C confirmation)
+document validity fields (minimal source set requires 1C confirmation)
+update marker or last_modified_at (if technically available)
+expiry availability through stable series_id/product_series
+receipts.expiry_date as control duplicate (если технически легко получить)
 ```
+
+Требуется стабильный технический ID записи, позволяющий повторную загрузку,
+upsert, перепроведение и отмену без дублей. `document_id`, `document_line_id` и
+`movement_id` — предпочтительная модель, а не заявление, что все три объекта
+обязательно существуют в конфигурации 1С.
 
 ### Желательные поля (SHOULD HAVE)
 
 ```text
+document_datetime
+movement_datetime
+characteristic_id
+characteristic_name
 movement_id
-receipt_datetime
 production_date
 series_id
 series_number
 batch_id
 batch_number
-container_number
 cost_amount
 vat_amount
 vat_included_in_cost
@@ -289,6 +338,15 @@ order_number
 source_document_id
 source_document_line_id
 ```
+
+Поля receipt-строки `cost_amount`, `vat_amount`, `vat_included_in_cost` и
+`currency` остаются SHOULD HAVE: они сохраняются как source facts, не меняют
+quantity и не блокируют запуск receipts, если их получение существенно усложняет
+endpoint.
+
+`gtd_number` не входит в обязательные поля receipts. При стабильном `series_id`
+предпочтительный canonical candidate — `product_series.gtd_number`; временный
+дубликат в receipts разрешён только для тестовой сверки.
 
 ### Требуют подтверждения 1С (REQUIRES 1C CONFIRMATION)
 
@@ -303,13 +361,13 @@ source_document_line_id
 
 ## 12. ОТКРЫТЫЕ ТЕХНИЧЕСКИЕ ВОПРОСЫ И ВОПРОСЫ К 1С
 
-1. Какой регистр и grain предоставляют физический приход?
-2. Есть ли стабильный UUID для документа, строки и движения?
-3. Какая дата соответствует фактическому поступлению на склад?
-4. Где хранится ссылка на контейнер/поставку и может ли она быть `0`/null в
-   корректной записи?
-5. Где находятся серия, дата производства и срок годности?
-6. Как связать финансовое движение с приходом без эвристики по текстовым полям?
-7. Какие статусы означают posted, deleted, cancelled и reposted?
-8. Как получать инкрементальные изменения и исправленные прошлые периоды?
-9. Какой формат manifest snapshot и где хранить raw payload и версию схемы?
+1. Можно ли вернуть стабильный `series_id` в каждой строке physical receipt?
+2. Какой grain используется, если один SKU документа имеет несколько series?
+3. Где хранится номер контейнера/поставки: в characteristic или другом реквизите?
+4. Какой datetime является фактической датой поступления на склад?
+5. Какие stable IDs доступны для документа, строки документа и движения прихода?
+6. Как API передаёт изменения, отмены, удаления и перепроведение physical receipt?
+
+Canonical `gtd_number`, `expiry_date` и другие атрибуты PRODUCT SERIES
+подтверждаются в рамках уже сформулированных вопросов OSG и здесь повторно не
+дублируются.

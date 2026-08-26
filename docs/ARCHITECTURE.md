@@ -45,7 +45,8 @@ service layer.
   ├→ products
   ├→ product_series
   ├→ barcodes
-  └→ stocks
+  ├→ stocks
+  └→ receipts
   → ingestion / API adapter
   → link and contract validation by source IDs
   → validation + ETL/service layer
@@ -68,6 +69,27 @@ OSG API — не один плоский JSON, а четыре связанны�
 PRODUCT → PRODUCT SERIES → STOCK SNAPSHOT
     └──────── BARCODE
 ```
+
+ARRIVALS использует ту же справочную модель:
+
+```text
+PRODUCT → PRODUCT SERIES → RECEIPT
+                            product_id
+                            series_id
+                            container/shipment number
+                            receipt_datetime
+                            quantity
+```
+
+`receipts.series_id` является предпочтительной связью с PRODUCT SERIES. Поля
+`expiry_date`, `production_date`, `gtd_number` и `country_of_origin`
+предпочтительно не дублируются автоматически в receipt, если доступны через
+стабильный `series_id`. На тестовом этапе дубликаты допускаются как control
+fields; расхождения сохраняются и диагностируются.
+
+Номер контейнера/поставки и `gtd_number` независимы. Документ движения «ГТД по
+импорту» не является physical receipt и не должен попадать в
+`GET /api/v1/receipts` как количественный приход.
 
 На тестовом этапе читаемые control fields могут дублироваться между endpoint.
 Их наличие помогает сверять связи, но не превращает `product_name` или
